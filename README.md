@@ -27,6 +27,12 @@ It supports:
 
 ---
 
+
+## Support
+If you encounter any issues or have questions, please create a new issue [here](https://github.com/AzureDoom/Modtale-CurseForge-Discord-Release-Bot/issues/new).
+
+We also have a [Discord server](https://discord.gg/EsJFKh4y6z) where you can ask questions and get help.
+
 ## Requirements
 
 - Python **3.10+**
