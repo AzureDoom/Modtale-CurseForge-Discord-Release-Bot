@@ -31,7 +31,7 @@ It supports:
 
 - Python **3.10+**
 - A Discord bot token
-- API access to the Modtale project(s) you want to track
+- API access to the Modtale project(s) you want to track. Get your Modtale api token from: https://modtale.net/dashboard/developer
 - Project IDs / slugs for CurseForge projects
 
 ---
