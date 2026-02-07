@@ -66,8 +66,8 @@ def load_config() -> Config:
     cf_poll_seconds = int(os.getenv("CURSEFORGE_POLL_SECONDS", str(poll_seconds)))
 
     # Expect JSON arrays in .env
-	modtale_raw = _parse_json_env_optional("MODTALE_PROJECTS_JSON")
-	curseforge_raw = _parse_json_env_optional("CURSEFORGE_PROJECTS_JSON")
+    modtale_raw = _parse_json_env_optional("MODTALE_PROJECTS_JSON")
+    curseforge_raw = _parse_json_env_optional("CURSEFORGE_PROJECTS_JSON")
 
     if not isinstance(modtale_raw, list):
         raise RuntimeError("MODTALE_PROJECTS_JSON must be a JSON array")
@@ -422,13 +422,13 @@ async def on_ready():
     poll_curseforge.change_interval(seconds=cfg.curseforge_poll_seconds)
     poll_modtale.change_interval(seconds=cfg.poll_seconds)
 
-	if cfg.modtale_projects and not poll_modtale.is_running():
-		poll_modtale.start()
-		print(f"Modtale projects: {len(cfg.modtale_projects)}")
+    if cfg.modtale_projects and not poll_modtale.is_running():
+        poll_modtale.start()
+        print(f"Modtale projects: {len(cfg.modtale_projects)}")
 
-	if cfg.curseforge_projects and not poll_curseforge.is_running():
-		poll_curseforge.start()
-		print(f"CurseForge projects: {len(cfg.curseforge_projects)}")
+    if cfg.curseforge_projects and not poll_curseforge.is_running():
+        poll_curseforge.start()
+        print(f"CurseForge projects: {len(cfg.curseforge_projects)}")
 
     print(f"Logged in as {client.user}")
     print("Successfully finished startup!")
