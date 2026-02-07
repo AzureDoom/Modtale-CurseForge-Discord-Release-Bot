@@ -119,7 +119,7 @@ Edit .env and configure:
 ### Build and start the container
 From the project root:
 ```bash
-docker compose up -d --build
+sudo docker compose up -d --build
 ```
 
 The bot will:
@@ -133,7 +133,7 @@ The bot will:
 ### View logs
 Simply run:
 ```bash
-docker compose logs -f
+sudo docker compose logs -f
 ```
 You should see:
 ```bash
@@ -144,12 +144,12 @@ Successfully finished startup
 ### Stop or restart the bot
 Stop:
 ```bash
-docker compose down
+sudo docker compose down
 ```
 
 Restart:
 ```bash
-docker compose restart
+sudo docker compose restart
 ```
 
 ### Updating the Bot
