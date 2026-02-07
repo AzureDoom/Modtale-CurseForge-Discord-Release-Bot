@@ -1,6 +1,6 @@
 # Modtale & CurseForge Discord Release Bot
 
-<img alt="GitHub License" src="https://img.shields.io/github/license/AzureDoom/LevelingCore"><img alt="GitHub Issues or Pull Requests" src="https://img.shields.io/github/issues/AzureDoom/LevelingCore"><img alt="GitHub top language" src="https://img.shields.io/github/languages/top/AzureDoom/LevelingCore">
+<img alt="GitHub License" src="https://img.shields.io/github/license/AzureDoom/Modtale-CurseForge-Discord-Release-Bot"><img alt="GitHub Issues or Pull Requests" src="https://img.shields.io/github/issues/AzureDoom/Modtale-CurseForge-Discord-Release-Bot"><img alt="GitHub top language" src="https://img.shields.io/github/languages/top/AzureDoom/Modtale-CurseForge-Discord-Release-Bot">
 
 
 A Discord bot that automatically monitors **Modtale** and **CurseForge** projects and posts update notifications when new versions/files are released.
@@ -39,7 +39,7 @@ It supports:
 ### Clone the repository
 
 ```bash
-git clone https://github.com/AzureDoom/your-repo-name.git
+git clone https://github.com/AzureDoom/Modtale-CurseForge-Discord-Release-Bot.git
 cd your-repo-name
 ```
 

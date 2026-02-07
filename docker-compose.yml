@@ -1,0 +1,10 @@
+ 
+services:
+  release-bot:
+    build: .
+    container_name: modtale-cf-release-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./cache.json:/app/cache.json
