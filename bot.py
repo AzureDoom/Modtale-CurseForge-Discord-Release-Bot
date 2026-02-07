@@ -201,6 +201,7 @@ def build_modtale_embed_and_view(project_uuid: str, project: dict, version: dict
     version_number = str(version.get("versionNumber", "")).strip() or str(version.get("id", "")).strip()
     author = project.get("author", "Unknown Author")
 
+    # Sets Modtale title, description, and color on the left side of the bots message. 
     embed = discord.Embed(
         title=f"A new version of {title} is available",
         description=f"**Version:** `{version_number}`\n\n*A new version has been published on Modtale.*",
@@ -289,6 +290,7 @@ def build_curseforge_embed_and_view(project_slug: str, project_json: dict, file_
     file_page = curseforge_modern_file_page_url(project_slug, file_id)
     file_dl = curseforge_modern_file_download_url(project_slug, file_id)
 
+    # Sets CurseForge title, description, and color on the left side of the bots message. 
     embed = discord.Embed(
         title=f"A new version of {project_title} is available",
         description=f"**Version:** `{file_display}`\n\n*A new file has been published on CurseForge.*",
