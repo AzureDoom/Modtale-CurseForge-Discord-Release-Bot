@@ -181,3 +181,17 @@ Bot starts but posts nothing:
 JSON parsing errors:
 - Make sure all keys use double quotes
 - Wrap JSON values in single quotes in .env
+
+---
+
+### Hosting Partner
+
+Looking for a reliable server to run this bot and other games on?
+
+**BisectHosting** offers pre-configured game servers, fast setup, and solid performance for modded environments along with bot, web hosting, and VPS servers.
+
+Use code **azuredoom** for **25% off your first month**.
+
+<a href="https://url-shortener.curseforge.com/z2g8c" rel="nofollow">
+  <img src="https://www.bisecthosting.com/images/CF/AzureLib/BH_AL_promo.png" alt="BisectHosting" />
+</a>
