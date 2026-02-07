@@ -42,7 +42,7 @@ It supports:
 
 ```bash
 git clone https://github.com/AzureDoom/Modtale-CurseForge-Discord-Release-Bot.git
-cd your-repo-name
+cd Modtale-CurseForge-Discord-Release-Bot
 ```
 
 ### Install dependencies
