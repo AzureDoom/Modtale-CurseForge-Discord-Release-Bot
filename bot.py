@@ -188,6 +188,13 @@ def make_absolute_url(base: str, maybe_relative: str) -> str:
 def modtale_download_url(project_uuid: str, version_number: str) -> str:
     return f"{MODTALE_BASE_URL.rstrip('/')}/api/v1/projects/{project_uuid}/versions/{version_number}/download"
 
+def modtale_icon_url_from_project(project: dict) -> str:
+    icon = (project.get("imageUrl") or "").strip()
+    if not icon:
+        imgs = project.get("galleryImages") or []
+        if imgs:
+            icon = str(imgs[0]).strip()
+    return make_absolute_url(MODTALE_BASE_URL, icon)
 
 def build_modtale_embed_and_view(project_uuid: str, project: dict, version: dict):
     title = project.get("title", "Modtale Project")
@@ -200,8 +207,9 @@ def build_modtale_embed_and_view(project_uuid: str, project: dict, version: dict
         color=discord.Color(0x0F172A),
     )
 
-    if project.get("galleryImages"):
-        embed.set_thumbnail(url=project["galleryImages"][0])
+    icon_url = modtale_icon_url_from_project(project)
+    if icon_url:
+        embed.set_thumbnail(url=icon_url)
 
     embed.set_footer(text=f"By {author}")
 
