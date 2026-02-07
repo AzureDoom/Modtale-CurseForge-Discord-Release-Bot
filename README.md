@@ -5,6 +5,8 @@
 
 A Discord bot that automatically monitors **Modtale** and **CurseForge** projects and posts update notifications when new versions/files are released.
 
+<img width="550" height="448" alt="image" src="https://github.com/user-attachments/assets/212d523d-bbd0-4ba6-a997-38e82c7d6760" />
+
 It supports:
 - Multiple Modtale projects
 - Multiple CurseForge projects
