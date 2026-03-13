@@ -1,15 +1,16 @@
- 
+import asyncio
+import html
+import json
 import os
 import re
-import json
-import asyncio
+import signal
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Set
+from urllib.parse import urljoin
 
 import aiohttp
 import discord
-import signal
-from urllib.parse import urljoin
 from discord.ext import tasks
 from dotenv import load_dotenv
 
@@ -17,7 +18,9 @@ load_dotenv()
 
 CACHE_FILE = "cache.json"
 MODTALE_BASE_URL = "https://api.modtale.net/"
-_CF_FILE_ID_RE = re.compile(r"/files/(\d+)")
+VERSION_HEADER_RE = re.compile(
+    r"(?mi)^(v?\d+(?:\.\d+)*(?:[-+._][A-Za-z0-9]+)?)\s*$"
+)
 
 
 @dataclass(frozen=True)
@@ -36,10 +39,8 @@ class CurseforgeProjectCfg:
 class Config:
     discord_token: str
     channel_id: int
-
     poll_seconds: int
     curseforge_poll_seconds: int
-
     modtale_projects: List[ModtaleProjectCfg]
     curseforge_projects: List[CurseforgeProjectCfg]
 
@@ -51,7 +52,7 @@ def require_env(name: str) -> str:
     return val
 
 
-def _parse_json_env_optional(name: str) -> Any:
+def parse_json_env_optional(name: str) -> Any:
     raw = (os.getenv(name) or "").strip()
     if not raw:
         return []
@@ -65,9 +66,8 @@ def load_config() -> Config:
     poll_seconds = int(os.getenv("POLL_SECONDS", "300"))
     cf_poll_seconds = int(os.getenv("CURSEFORGE_POLL_SECONDS", str(poll_seconds)))
 
-    # Expect JSON arrays in .env
-    modtale_raw = _parse_json_env_optional("MODTALE_PROJECTS_JSON")
-    curseforge_raw = _parse_json_env_optional("CURSEFORGE_PROJECTS_JSON")
+    modtale_raw = parse_json_env_optional("MODTALE_PROJECTS_JSON")
+    curseforge_raw = parse_json_env_optional("CURSEFORGE_PROJECTS_JSON")
 
     if not isinstance(modtale_raw, list):
         raise RuntimeError("MODTALE_PROJECTS_JSON must be a JSON array")
@@ -75,26 +75,30 @@ def load_config() -> Config:
         raise RuntimeError("CURSEFORGE_PROJECTS_JSON must be a JSON array")
 
     modtale_projects: List[ModtaleProjectCfg] = []
-    for i, p in enumerate(modtale_raw):
-        if not isinstance(p, dict):
+    for i, item in enumerate(modtale_raw):
+        if not isinstance(item, dict):
             raise RuntimeError(f"MODTALE_PROJECTS_JSON[{i}] must be an object")
-        uuid = str(p.get("project_uuid") or p.get("uuid") or "").strip()
-        if not uuid:
+        project_uuid = str(item.get("project_uuid") or item.get("uuid") or "").strip()
+        if not project_uuid:
             raise RuntimeError(f"MODTALE_PROJECTS_JSON[{i}] missing project_uuid")
-        api_token = str(p.get("api_token") or "").strip()
-        modtale_projects.append(ModtaleProjectCfg(project_uuid=uuid, api_token=api_token))
+        api_token = str(item.get("api_token") or "").strip()
+        modtale_projects.append(
+            ModtaleProjectCfg(project_uuid=project_uuid, api_token=api_token)
+        )
 
     curseforge_projects: List[CurseforgeProjectCfg] = []
-    for i, p in enumerate(curseforge_raw):
-        if not isinstance(p, dict):
+    for i, item in enumerate(curseforge_raw):
+        if not isinstance(item, dict):
             raise RuntimeError(f"CURSEFORGE_PROJECTS_JSON[{i}] must be an object")
-        pid = str(p.get("project_id") or "").strip()
-        slug = str(p.get("project_slug") or "").strip()
-        if not pid:
+        project_id = str(item.get("project_id") or "").strip()
+        project_slug = str(item.get("project_slug") or "").strip()
+        if not project_id:
             raise RuntimeError(f"CURSEFORGE_PROJECTS_JSON[{i}] missing project_id")
-        if not slug:
+        if not project_slug:
             raise RuntimeError(f"CURSEFORGE_PROJECTS_JSON[{i}] missing project_slug")
-        curseforge_projects.append(CurseforgeProjectCfg(project_id=pid, project_slug=slug))
+        curseforge_projects.append(
+            CurseforgeProjectCfg(project_id=project_id, project_slug=project_slug)
+        )
 
     return Config(
         discord_token=require_env("DISCORD_BOT_TOKEN"),
@@ -156,22 +160,16 @@ class JsonCache:
         return self.curseforge_seen.setdefault(project_id, set())
 
 
-async def fetch_text(
-    session: aiohttp.ClientSession,
-    url: str,
-    headers: Optional[Dict[str, str]] = None,
-) -> str:
-    async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-        resp.raise_for_status()
-        return await resp.text()
-
-
 async def fetch_json(
     session: aiohttp.ClientSession,
     url: str,
     headers: Optional[Dict[str, str]] = None,
 ) -> Any:
-    async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+    async with session.get(
+        url,
+        headers=headers,
+        timeout=aiohttp.ClientTimeout(total=30),
+    ) as resp:
         resp.raise_for_status()
         return await resp.json()
 
@@ -180,140 +178,377 @@ def make_absolute_url(base: str, maybe_relative: str) -> str:
     maybe_relative = (maybe_relative or "").strip()
     if not maybe_relative:
         return ""
-    if maybe_relative.startswith("http://") or maybe_relative.startswith("https://"):
+    if maybe_relative.startswith(("http://", "https://")):
         return maybe_relative
     return urljoin(base.rstrip("/") + "/", maybe_relative.lstrip("/"))
 
 
+def strip_html_tags(value: str) -> str:
+    class HTMLToText(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.parts: List[str] = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "br":
+                self.parts.append("\n")
+            elif tag in {"p", "div", "section", "article"}:
+                if self.parts and not self.parts[-1].endswith("\n\n"):
+                    self.parts.append("\n\n")
+            elif tag == "li":
+                self.parts.append("- ")
+            elif tag in {"ul", "ol"}:
+                if self.parts and not self.parts[-1].endswith("\n"):
+                    self.parts.append("\n")
+            elif tag in {"strong", "b"}:
+                self.parts.append("**")
+            elif tag in {"em", "i"}:
+                self.parts.append("*")
+            elif tag == "code":
+                self.parts.append("`")
+            elif tag == "pre":
+                self.parts.append("\n```text\n")
+
+        def handle_endtag(self, tag):
+            if tag in {"p", "div", "section", "article"}:
+                if not self.parts or not self.parts[-1].endswith("\n\n"):
+                    self.parts.append("\n\n")
+            elif tag in {"strong", "b"}:
+                self.parts.append("**")
+            elif tag in {"em", "i"}:
+                self.parts.append("*")
+            elif tag == "code":
+                self.parts.append("`")
+            elif tag == "pre":
+                if not self.parts or not self.parts[-1].endswith("\n"):
+                    self.parts.append("\n")
+                self.parts.append("```\n")
+            elif tag == "li":
+                if not self.parts or not self.parts[-1].endswith("\n"):
+                    self.parts.append("\n")
+
+        def handle_data(self, data):
+            if data:
+                self.parts.append(data)
+
+        def get_text(self) -> str:
+            text = "".join(self.parts)
+            text = html.unescape(text)
+            text = re.sub(r"\n{3,}", "\n\n", text)
+            return text.strip()
+
+    parser = HTMLToText()
+    parser.feed(value or "")
+    return parser.get_text()
+
+
+def clean_discord_changelog_text(text: str) -> str:
+    if not text:
+        return ""
+    text = strip_html_tags(text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def convert_markdown_tables_to_codeblocks(text: str) -> str:
+    lines = text.splitlines()
+    out: List[str] = []
+    i = 0
+
+    while i < len(lines):
+        if (
+            i + 1 < len(lines)
+            and "|" in lines[i]
+            and "|" in lines[i + 1]
+            and re.search(r":?-{3,}:?", lines[i + 1])
+        ):
+            table_lines = [lines[i], lines[i + 1]]
+            i += 2
+            while i < len(lines) and "|" in lines[i]:
+                table_lines.append(lines[i])
+                i += 1
+            out.append("```")
+            out.extend(table_lines)
+            out.append("```")
+            continue
+
+        out.append(lines[i])
+        i += 1
+
+    return "\n".join(out)
+
+
+def extract_latest_changelog_section(text: str) -> str:
+    if not text:
+        return ""
+
+    text = text.replace("\r\n", "\n").strip()
+    if not text:
+        return ""
+
+    matches = list(VERSION_HEADER_RE.finditer(text))
+    if not matches:
+        return text
+
+    start = matches[0].start()
+    end = matches[1].start() if len(matches) > 1 else len(text)
+    return text[start:end].strip()
+
+
+def truncate_discord_markdown(text: str, limit: int = 1000) -> str:
+    if not text:
+        return ""
+
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+
+    truncated = text[: limit - 3]
+
+    if truncated.count("```") % 2 != 0:
+        truncated = truncated.rsplit("```", 1)[0].rstrip()
+    if truncated.count("**") % 2 != 0:
+        truncated = truncated.rsplit("**", 1)[0].rstrip()
+
+    if "\n" in truncated[-200:]:
+        truncated = truncated.rsplit("\n", 1)[0].rstrip()
+    elif " " in truncated[-200:]:
+        truncated = truncated.rsplit(" ", 1)[0].rstrip()
+
+    return truncated + "..."
+
+
+def format_changelog_for_discord(raw_text: str, limit: int = 1000) -> str:
+    if not raw_text:
+        return ""
+
+    text = clean_discord_changelog_text(raw_text)
+    text = extract_latest_changelog_section(text)
+    text = convert_markdown_tables_to_codeblocks(text)
+    text = clean_discord_changelog_text(text)
+    return truncate_discord_markdown(text, limit=limit)
+
+def slugify(text: str) -> str:
+    text = str(text or "").lower().strip()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    return text.strip("-")
+
+def make_url_view(*buttons: tuple[str, Optional[str]]) -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    for label, url in buttons:
+        if url:
+            view.add_item(discord.ui.Button(label=label, url=url))
+    return view
+
+def get_modtale_changelog(version: dict, project: dict) -> str:
+    return (
+        str(version.get("changelog") or "").strip()
+        or str(version.get("releaseNotes") or "").strip()
+        or str(version.get("body") or "").strip()
+        or str(project.get("changelog") or "").strip()
+    )
+
 def modtale_download_url(project_uuid: str, version_number: str) -> str:
-    return f"{MODTALE_BASE_URL.rstrip('/')}/api/v1/projects/{project_uuid}/versions/{version_number}/download"
+    return (
+        f"{MODTALE_BASE_URL.rstrip('/')}/api/v1/projects/"
+        f"{project_uuid}/versions/{version_number}/download"
+    )
+
+def modtale_project_page_url(project: dict, project_uuid: str) -> str:
+    slug = (
+        project.get("slug")
+        or project.get("name")
+        or project.get("title")
+        or "project"
+    )
+    return f"https://modtale.net/mod/{slugify(slug)}-{project_uuid}"
 
 def modtale_icon_url_from_project(project: dict) -> str:
     icon = (project.get("imageUrl") or "").strip()
     if not icon:
-        imgs = project.get("galleryImages") or []
-        if imgs:
-            icon = str(imgs[0]).strip()
+        gallery_images = project.get("galleryImages") or []
+        if gallery_images:
+            icon = str(gallery_images[0]).strip()
     return make_absolute_url(MODTALE_BASE_URL, icon)
 
-def build_modtale_embed_and_view(project_uuid: str, project: dict, version: dict):
-    title = project.get("title", "Modtale Project")
-    version_number = str(version.get("versionNumber", "")).strip() or str(version.get("id", "")).strip()
-    author = project.get("author", "Unknown Author")
 
-    # Sets Modtale title, description, and color on the left side of the bots message. 
-    embed = discord.Embed(
-        title=f"A new version of {title} is available",
-        description=f"**Version:** `{version_number}`\n\n*A new version has been published on Modtale.*",
-        color=discord.Color(0x0F172A),
-    )
-
-    icon_url = modtale_icon_url_from_project(project)
-    if icon_url:
-        embed.set_thumbnail(url=icon_url)
-
-    embed.set_footer(text=f"By {author}")
-
-    view = discord.ui.View(timeout=None)
-    if version_number:
-        dl = modtale_download_url(project_uuid, version_number)
-        view.add_item(discord.ui.Button(label="Download from Modtale", url=dl))
-
-    return embed, view
+def curseforge_file_page_url(project_slug: str, file_id: str) -> str:
+    return f"https://www.curseforge.com/hytale/mods/{project_slug}/files/{file_id}"
 
 
-def pick_new_modtale_versions(project_json: Dict[str, Any], seen: Set[str]) -> List[Dict[str, Any]]:
-    versions = project_json.get("versions") or []
-    new_items: List[Dict[str, Any]] = []
-    for v in versions:
-        vid = str(v.get("id", "")).strip()
-        if not vid:
-            continue
-        if vid not in seen:
-            new_items.append(v)
-    return new_items
-
-
-def curseforge_modern_file_page_url(project_slug: str, file_id: str) -> str:
+def curseforge_file_download_url(project_slug: str, file_id: str) -> str:
     return f"https://www.curseforge.com/hytale/mods/{project_slug}/download/{file_id}"
-
-
-def curseforge_modern_file_download_url(project_slug: str, file_id: str) -> str:
-    return f"https://www.curseforge.com/hytale/mods/{project_slug}/files/{file_id}/download"
 
 
 def cfwidget_project_url(project_id: str) -> str:
     return f"https://api.cfwidget.com/{project_id}"
 
 
-def parse_cfwidget_files(project_json: dict) -> list[dict]:
+def parse_cfwidget_files(project_json: dict) -> List[dict]:
     files = project_json.get("files") or []
-    out: list[dict] = []
-    seen: set[str] = set()
+    out: List[dict] = []
+    seen: Set[str] = set()
 
-    for f in files:
-        fid = f.get("id")
-        if fid is None:
+    for file_obj in files:
+        file_id = file_obj.get("id")
+        if file_id is None:
             continue
-        fid_s = str(fid)
-        if fid_s in seen:
+        file_id_str = str(file_id)
+        if file_id_str in seen:
             continue
-        seen.add(fid_s)
-        out.append(f)
+        seen.add(file_id_str)
+        out.append(file_obj)
 
     return out
 
 
-def build_curseforge_embed_and_view(project_slug: str, project_json: dict, file_obj: dict) -> tuple[discord.Embed, discord.ui.View]:
-    project_title = (
+def pick_new_modtale_versions(project_json: Dict[str, Any], seen: Set[str]) -> List[Dict[str, Any]]:
+    versions = project_json.get("versions") or []
+    new_items: List[Dict[str, Any]] = []
+
+    for version in versions:
+        version_id = str(version.get("id", "")).strip()
+        if version_id and version_id not in seen:
+            new_items.append(version)
+
+    return new_items
+
+
+def get_curseforge_author(project_json: dict) -> str:
+    members = project_json.get("members") or []
+    if isinstance(members, list):
+        for member in members:
+            if not isinstance(member, dict):
+                continue
+            for key in ("username", "name", "title"):
+                value = str(member.get(key) or "").strip()
+                if value:
+                    return value
+    return "Unknown Author"
+
+def normalize_thumbnail_url(value: Any) -> Optional[str]:
+    if isinstance(value, str) and value.startswith(("http://", "https://")):
+        return value
+    return None
+
+def build_release_embed_and_view(
+    *,
+    platform_name: str,
+    project_title: str,
+    version_label: str,
+    author: str,
+    changelog_text: str = "",
+    thumbnail_url: Optional[str] = None,
+    buttons: List[tuple[str, Optional[str]]],
+) -> tuple[discord.Embed, discord.ui.View]:
+    embed = discord.Embed(
+        title=f"A new version of {project_title} is available",
+        description=(
+            f"**Version:** `{version_label}`\n\n"
+            f"*A new version has been published on {platform_name}.*"
+        ),
+        color=discord.Color(0x0F172A),
+    )
+
+    if thumbnail_url:
+        embed.set_thumbnail(url=thumbnail_url)
+
+    if changelog_text:
+        embed.add_field(name="Changelog", value=changelog_text, inline=False)
+
+    embed.set_footer(text=f"By {author}")
+
+    view = make_url_view(*buttons)
+    return embed, view
+
+def build_modtale_embed_and_view(
+    project_uuid: str,
+    project: dict,
+    version: dict,
+) -> tuple[discord.Embed, discord.ui.View]:
+    project_title = str(project.get("title") or "Modtale Project")
+    version_label = (
+        str(version.get("versionNumber", "")).strip()
+        or str(version.get("id", "")).strip()
+    )
+    author = str(project.get("author") or "Unknown Author")
+    changelog_text = format_changelog_for_discord(
+        get_modtale_changelog(version, project),
+        limit=1000,
+    )
+    thumbnail_url = normalize_thumbnail_url(modtale_icon_url_from_project(project))
+
+    return build_release_embed_and_view(
+        platform_name="Modtale",
+        project_title=project_title,
+        version_label=version_label,
+        author=author,
+        changelog_text=changelog_text,
+        thumbnail_url=thumbnail_url,
+        buttons=[
+            (
+                "Download from Modtale",
+                modtale_download_url(project_uuid, version_label) if version_label else None,
+            ),
+            (
+                "View File Page",
+                modtale_project_page_url(project, project_uuid),
+            ),
+        ],
+    )
+
+def build_curseforge_embed_and_view(
+    project_slug: str,
+    project_json: dict,
+    file_obj: dict,
+) -> tuple[discord.Embed, discord.ui.View]:
+    project_title = str(
         project_json.get("title")
         or project_json.get("name")
         or project_slug
     )
 
-    file_display = (
-        file_obj.get("displayName")
+    version_label = str(
+        file_obj.get("display")
         or file_obj.get("name")
-        or file_obj.get("fileName")
-        or str(file_obj.get("id"))
-    )
-
-    author = (
-        project_json.get("author")
-        or project_json.get("owner")
-        or project_json.get("username")
-        or "Unknown"
+        or file_obj.get("version")
+        or file_obj.get("id")
+        or "Unknown Version"
     )
 
     file_id = str(file_obj.get("id", "")).strip()
+    author = get_curseforge_author(project_json)
 
-    file_page = curseforge_modern_file_page_url(project_slug, file_id)
-    file_dl = curseforge_modern_file_download_url(project_slug, file_id)
-
-    # Sets CurseForge title, description, and color on the left side of the bots message. 
-    embed = discord.Embed(
-        title=f"A new version of {project_title} is available",
-        description=f"**Version:** `{file_display}`\n\n*A new file has been published on CurseForge.*",
-        color=discord.Color(0x0F172A),
-    )
-
-    thumb = (
+    thumbnail_url = normalize_thumbnail_url(
         project_json.get("thumbnail")
         or project_json.get("logo")
         or (project_json.get("attachments") or {}).get("logo")
         or project_json.get("avatar")
     )
-    if isinstance(thumb, str) and thumb.startswith("http"):
-        embed.set_thumbnail(url=thumb)
 
-    embed.set_footer(text=f"By {author}")
+    return build_release_embed_and_view(
+        platform_name="CurseForge",
+        project_title=project_title,
+        version_label=version_label,
+        author=author,
+        changelog_text="",
+        thumbnail_url=thumbnail_url,
+        buttons=[
+            (
+                "Download from CurseForge",
+                curseforge_file_download_url(project_slug, file_id) if file_id else None,
+            ),
+            (
+                "View File Page",
+                curseforge_file_page_url(project_slug, file_id) if file_id else None,
+            ),
+        ],
+    )
 
-    view = discord.ui.View(timeout=None)
-    view.add_item(discord.ui.Button(label="Download from CurseForge", url=file_page))
-    # If you want the direct download link too, uncomment:
-    # view.add_item(discord.ui.Button(label="Direct download", url=file_dl))
-
-    return embed, view
+def log_release(source: str, project_name: str, version_name: str, identifier: str) -> None:
+    print(f"[release][{source}] {project_name} -> {version_name} ({identifier})")
 
 
 intents = discord.Intents.default()
@@ -327,9 +562,10 @@ http_session: Optional[aiohttp.ClientSession] = None
 
 
 async def get_target_channel() -> discord.TextChannel:
-    ch = client.get_channel(cfg.channel_id)
-    if isinstance(ch, discord.TextChannel):
-        return ch
+    channel = client.get_channel(cfg.channel_id)
+    if isinstance(channel, discord.TextChannel):
+        return channel
+
     fetched = await client.fetch_channel(cfg.channel_id)
     if not isinstance(fetched, discord.TextChannel):
         raise RuntimeError("CHANNEL_ID is not a text channel.")
@@ -337,98 +573,126 @@ async def get_target_channel() -> discord.TextChannel:
 
 
 @tasks.loop(seconds=60)
-async def poll_curseforge():
+async def poll_curseforge() -> None:
     if http_session is None:
         return
 
     channel = await get_target_channel()
 
-    for p in cfg.curseforge_projects:
-        url = cfwidget_project_url(p.project_id)
-        headers = {"Accept": "application/json"}
-
+    for project_cfg in cfg.curseforge_projects:
         try:
-            project_json = await fetch_json(http_session, url, headers=headers)
+            project_json = await fetch_json(
+                http_session,
+                cfwidget_project_url(project_cfg.project_id),
+                headers={"Accept": "application/json"},
+            )
+
             files = parse_cfwidget_files(project_json)
             if not files:
                 continue
 
-            seen = cache.get_curseforge_seen(p.project_id)
+            seen = cache.get_curseforge_seen(project_cfg.project_id)
             new_files = [f for f in files if str(f.get("id")) not in seen]
             if not new_files:
                 continue
 
-            # Post oldest-first so Discord reads nicely
-            for f in reversed(new_files):
-                fid = str(f.get("id"))
-                embed, view = build_curseforge_embed_and_view(p.project_slug, project_json, f)
+            for file_obj in reversed(new_files):
+                file_id = str(file_obj.get("id", "")).strip()
+                file_display = (
+                    file_obj.get("display")
+                    or file_obj.get("name")
+                    or file_obj.get("version")
+                    or file_id
+                )
+                project_title = (
+                    project_json.get("title")
+                    or project_json.get("name")
+                    or project_cfg.project_slug
+                )
+
+                embed, view = build_curseforge_embed_and_view(
+                    project_cfg.project_slug,
+                    project_json,
+                    file_obj,
+                )
                 await channel.send(embed=embed, view=view)
-                seen.add(fid)
+
+                if file_id:
+                    seen.add(file_id)
+                log_release("curseforge", project_title, str(file_display), file_id)
 
             cache.save()
 
         except aiohttp.ClientResponseError as e:
-            print(f"[curseforge:{p.project_id}] HTTP error {e.status}: {e.message}")
+            print(f"[curseforge:{project_cfg.project_id}] HTTP error {e.status}: {e.message}")
         except Exception as e:
-            print(f"[curseforge:{p.project_id}] Error: {e}")
+            print(f"[curseforge:{project_cfg.project_id}] Error: {e}")
 
 
 @poll_curseforge.before_loop
-async def before_curseforge():
+async def before_curseforge() -> None:
     await client.wait_until_ready()
     await asyncio.sleep(2)
 
 
 @tasks.loop(seconds=60)
-async def poll_modtale():
+async def poll_modtale() -> None:
     if http_session is None:
         return
 
     channel = await get_target_channel()
 
-    for p in cfg.modtale_projects:
-        url = f"{MODTALE_BASE_URL.rstrip('/')}/api/v1/projects/{p.project_uuid}"
+    for project_cfg in cfg.modtale_projects:
         headers: Dict[str, str] = {"Accept": "application/json"}
-        if p.api_token:
-            headers["X-MODTALE-KEY"] = p.api_token
+        if project_cfg.api_token:
+            headers["X-MODTALE-KEY"] = project_cfg.api_token
 
         try:
-            project = await fetch_json(http_session, url, headers=headers)
+            project = await fetch_json(
+                http_session,
+                f"{MODTALE_BASE_URL.rstrip('/')}/api/v1/projects/{project_cfg.project_uuid}",
+                headers=headers,
+            )
 
-            seen = cache.get_modtale_seen(p.project_uuid)
+            seen = cache.get_modtale_seen(project_cfg.project_uuid)
             new_versions = pick_new_modtale_versions(project, seen)
             if not new_versions:
                 continue
 
-            for v in new_versions:
-                embed, view = build_modtale_embed_and_view(p.project_uuid, project, v)
+            for version in reversed(new_versions):
+                embed, view = build_modtale_embed_and_view(
+                    project_cfg.project_uuid,
+                    project,
+                    version,
+                )
                 await channel.send(embed=embed, view=view)
 
-                vid = str(v.get("id", "")).strip()
-                if vid:
-                    seen.add(vid)
+                version_id = str(version.get("id", "")).strip()
+                version_number = (
+                    str(version.get("versionNumber", "")).strip() or version_id
+                )
+                project_title = str(project.get("title") or project_cfg.project_uuid)
+
+                if version_id:
+                    seen.add(version_id)
+                log_release("modtale", project_title, version_number, version_id)
 
             cache.save()
 
         except aiohttp.ClientResponseError as e:
-            print(f"[modtale:{p.project_uuid}] HTTP error {e.status}: {e.message}")
+            print(f"[modtale:{project_cfg.project_uuid}] HTTP error {e.status}: {e.message}")
         except Exception as e:
-            print(f"[modtale:{p.project_uuid}] Error: {e}")
+            print(f"[modtale:{project_cfg.project_uuid}] Error: {e}")
 
 
 @poll_modtale.before_loop
-async def before_modtale():
+async def before_modtale() -> None:
     await client.wait_until_ready()
     await asyncio.sleep(2)
 
 
 @client.event
-async def on_ready():
-    global http_session
-
-    if http_session is None:
-        http_session = aiohttp.ClientSession()
-
+async def on_ready() -> None:
     poll_curseforge.change_interval(seconds=cfg.curseforge_poll_seconds)
     poll_modtale.change_interval(seconds=cfg.poll_seconds)
 
@@ -444,18 +708,27 @@ async def on_ready():
     print("Successfully finished startup!")
 
 
-async def shutdown():
+async def shutdown() -> None:
     global http_session
+
     try:
+        if poll_modtale.is_running():
+            poll_modtale.cancel()
+        if poll_curseforge.is_running():
+            poll_curseforge.cancel()
+
         if http_session is not None:
             await http_session.close()
             http_session = None
     finally:
         await client.close()
 
-async def run_bot():
+
+async def run_bot() -> None:
     global http_session
-    http_session = aiohttp.ClientSession()
+
+    if http_session is None:
+        http_session = aiohttp.ClientSession()
 
     try:
         await client.start(cfg.discord_token)
@@ -464,8 +737,9 @@ async def run_bot():
             await http_session.close()
             http_session = None
 
-def main():
-    async def runner():
+
+def main() -> None:
+    async def runner() -> None:
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
 
@@ -476,11 +750,8 @@ def main():
                 signal.signal(sig, lambda *_: stop_event.set())
 
         bot_task = asyncio.create_task(run_bot())
-
         await stop_event.wait()
-
-        await client.close()
-
+        await shutdown()
         await bot_task
 
     asyncio.run(runner())
