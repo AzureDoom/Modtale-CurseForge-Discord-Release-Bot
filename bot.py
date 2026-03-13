@@ -18,15 +18,12 @@ load_dotenv()
 
 CACHE_FILE = "cache.json"
 MODTALE_BASE_URL = "https://api.modtale.net/"
-VERSION_HEADER_RE = re.compile(
-    r"(?mi)^(v?\d+(?:\.\d+)*(?:[-+._][A-Za-z0-9]+)?)\s*$"
-)
+VERSION_HEADER_RE = re.compile(r"(?mi)^(v?\d+(?:\.\d+)*(?:[-+._][A-Za-z0-9]+)?)\s*$")
 
 
 @dataclass(frozen=True)
 class ModtaleProjectCfg:
     project_uuid: str
-    api_token: str = ""
 
 
 @dataclass(frozen=True)
@@ -41,6 +38,7 @@ class Config:
     channel_id: int
     poll_seconds: int
     curseforge_poll_seconds: int
+    modtale_api_token: str
     modtale_projects: List[ModtaleProjectCfg]
     curseforge_projects: List[CurseforgeProjectCfg]
 
@@ -66,6 +64,8 @@ def load_config() -> Config:
     poll_seconds = int(os.getenv("POLL_SECONDS", "300"))
     cf_poll_seconds = int(os.getenv("CURSEFORGE_POLL_SECONDS", str(poll_seconds)))
 
+    modtale_api_token = str(os.getenv("MODTALE_API_TOKEN") or "").strip()
+
     modtale_raw = parse_json_env_optional("MODTALE_PROJECTS_JSON")
     curseforge_raw = parse_json_env_optional("CURSEFORGE_PROJECTS_JSON")
 
@@ -81,10 +81,7 @@ def load_config() -> Config:
         project_uuid = str(item.get("project_uuid") or item.get("uuid") or "").strip()
         if not project_uuid:
             raise RuntimeError(f"MODTALE_PROJECTS_JSON[{i}] missing project_uuid")
-        api_token = str(item.get("api_token") or "").strip()
-        modtale_projects.append(
-            ModtaleProjectCfg(project_uuid=project_uuid, api_token=api_token)
-        )
+        modtale_projects.append(ModtaleProjectCfg(project_uuid=project_uuid))
 
     curseforge_projects: List[CurseforgeProjectCfg] = []
     for i, item in enumerate(curseforge_raw):
@@ -105,6 +102,7 @@ def load_config() -> Config:
         channel_id=int(require_env("CHANNEL_ID")),
         poll_seconds=poll_seconds,
         curseforge_poll_seconds=cf_poll_seconds,
+        modtale_api_token=modtale_api_token,
         modtale_projects=modtale_projects,
         curseforge_projects=curseforge_projects,
     )
@@ -118,6 +116,7 @@ class JsonCache:
       "curseforge_seen": {"<project_id>": ["6075247","1234567"]}
     }
     """
+
     def __init__(self, path: str):
         self.path = path
         self.modtale_seen: Dict[str, Set[str]] = {}
@@ -330,10 +329,12 @@ def format_changelog_for_discord(raw_text: str, limit: int = 1000) -> str:
     text = clean_discord_changelog_text(text)
     return truncate_discord_markdown(text, limit=limit)
 
+
 def slugify(text: str) -> str:
     text = str(text or "").lower().strip()
     text = re.sub(r"[^a-z0-9]+", "-", text)
     return text.strip("-")
+
 
 def make_url_view(*buttons: tuple[str, Optional[str]]) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
@@ -341,6 +342,7 @@ def make_url_view(*buttons: tuple[str, Optional[str]]) -> discord.ui.View:
         if url:
             view.add_item(discord.ui.Button(label=label, url=url))
     return view
+
 
 def get_modtale_changelog(version: dict, project: dict) -> str:
     return (
@@ -350,20 +352,20 @@ def get_modtale_changelog(version: dict, project: dict) -> str:
         or str(project.get("changelog") or "").strip()
     )
 
+
 def modtale_download_url(project_uuid: str, version_number: str) -> str:
     return (
         f"{MODTALE_BASE_URL.rstrip('/')}/api/v1/projects/"
         f"{project_uuid}/versions/{version_number}/download"
     )
 
+
 def modtale_project_page_url(project: dict, project_uuid: str) -> str:
     slug = (
-        project.get("slug")
-        or project.get("name")
-        or project.get("title")
-        or "project"
+        project.get("slug") or project.get("name") or project.get("title") or "project"
     )
     return f"https://modtale.net/mod/{slugify(slug)}-{project_uuid}"
+
 
 def modtale_icon_url_from_project(project: dict) -> str:
     icon = (project.get("imageUrl") or "").strip()
@@ -404,7 +406,9 @@ def parse_cfwidget_files(project_json: dict) -> List[dict]:
     return out
 
 
-def pick_new_modtale_versions(project_json: Dict[str, Any], seen: Set[str]) -> List[Dict[str, Any]]:
+def pick_new_modtale_versions(
+    project_json: Dict[str, Any], seen: Set[str]
+) -> List[Dict[str, Any]]:
     versions = project_json.get("versions") or []
     new_items: List[Dict[str, Any]] = []
 
@@ -428,10 +432,12 @@ def get_curseforge_author(project_json: dict) -> str:
                     return value
     return "Unknown Author"
 
+
 def normalize_thumbnail_url(value: Any) -> Optional[str]:
     if isinstance(value, str) and value.startswith(("http://", "https://")):
         return value
     return None
+
 
 def build_release_embed_and_view(
     *,
@@ -443,6 +449,7 @@ def build_release_embed_and_view(
     thumbnail_url: Optional[str] = None,
     buttons: List[tuple[str, Optional[str]]],
 ) -> tuple[discord.Embed, discord.ui.View]:
+    # Sets title, description, and color on the left side of the bots message.
     embed = discord.Embed(
         title=f"A new version of {project_title} is available",
         description=(
@@ -462,6 +469,7 @@ def build_release_embed_and_view(
 
     view = make_url_view(*buttons)
     return embed, view
+
 
 def build_modtale_embed_and_view(
     project_uuid: str,
@@ -490,7 +498,11 @@ def build_modtale_embed_and_view(
         buttons=[
             (
                 "Download from Modtale",
-                modtale_download_url(project_uuid, version_label) if version_label else None,
+                (
+                    modtale_download_url(project_uuid, version_label)
+                    if version_label
+                    else None
+                ),
             ),
             (
                 "View File Page",
@@ -499,15 +511,14 @@ def build_modtale_embed_and_view(
         ],
     )
 
+
 def build_curseforge_embed_and_view(
     project_slug: str,
     project_json: dict,
     file_obj: dict,
 ) -> tuple[discord.Embed, discord.ui.View]:
     project_title = str(
-        project_json.get("title")
-        or project_json.get("name")
-        or project_slug
+        project_json.get("title") or project_json.get("name") or project_slug
     )
 
     version_label = str(
@@ -538,7 +549,11 @@ def build_curseforge_embed_and_view(
         buttons=[
             (
                 "Download from CurseForge",
-                curseforge_file_download_url(project_slug, file_id) if file_id else None,
+                (
+                    curseforge_file_download_url(project_slug, file_id)
+                    if file_id
+                    else None
+                ),
             ),
             (
                 "View File Page",
@@ -547,7 +562,10 @@ def build_curseforge_embed_and_view(
         ],
     )
 
-def log_release(source: str, project_name: str, version_name: str, identifier: str) -> None:
+
+def log_release(
+    source: str, project_name: str, version_name: str, identifier: str
+) -> None:
     print(f"[release][{source}] {project_name} -> {version_name} ({identifier})")
 
 
@@ -624,7 +642,9 @@ async def poll_curseforge() -> None:
             cache.save()
 
         except aiohttp.ClientResponseError as e:
-            print(f"[curseforge:{project_cfg.project_id}] HTTP error {e.status}: {e.message}")
+            print(
+                f"[curseforge:{project_cfg.project_id}] HTTP error {e.status}: {e.message}"
+            )
         except Exception as e:
             print(f"[curseforge:{project_cfg.project_id}] Error: {e}")
 
@@ -644,8 +664,8 @@ async def poll_modtale() -> None:
 
     for project_cfg in cfg.modtale_projects:
         headers: Dict[str, str] = {"Accept": "application/json"}
-        if project_cfg.api_token:
-            headers["X-MODTALE-KEY"] = project_cfg.api_token
+        if cfg.modtale_api_token:
+            headers["X-MODTALE-KEY"] = cfg.modtale_api_token
 
         try:
             project = await fetch_json(
@@ -680,7 +700,9 @@ async def poll_modtale() -> None:
             cache.save()
 
         except aiohttp.ClientResponseError as e:
-            print(f"[modtale:{project_cfg.project_uuid}] HTTP error {e.status}: {e.message}")
+            print(
+                f"[modtale:{project_cfg.project_uuid}] HTTP error {e.status}: {e.message}"
+            )
         except Exception as e:
             print(f"[modtale:{project_cfg.project_uuid}] Error: {e}")
 
