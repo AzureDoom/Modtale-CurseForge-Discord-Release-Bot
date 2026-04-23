@@ -1,16 +1,17 @@
-# Modtale & CurseForge Discord Release Bot
+# Modtale , Modifold and CurseForge Discord Release Bot
 
 <img alt="GitHub License" src="https://img.shields.io/github/license/AzureDoom/Modtale-CurseForge-Discord-Release-Bot"><img alt="GitHub Issues or Pull Requests" src="https://img.shields.io/github/issues/AzureDoom/Modtale-CurseForge-Discord-Release-Bot"><img alt="GitHub top language" src="https://img.shields.io/github/languages/top/AzureDoom/Modtale-CurseForge-Discord-Release-Bot">
 
 
-A Discord bot that automatically monitors **Modtale** and **CurseForge** projects and posts update notifications when new versions/files are released.
+A Discord bot that automatically monitors **Modtale**, **Modifold**, and **CurseForge** projects and posts update notifications when new versions/files are released.
 
 <img width="550" height="448" alt="image" src="https://github.com/user-attachments/assets/212d523d-bbd0-4ba6-a997-38e82c7d6760" />
 
 It supports:
 - Multiple Modtale projects
+- Multiple Modifold projects
 - Multiple CurseForge projects
-- Either platform independently (Modtale-only or CurseForge-only)
+- Either platform independently (Modtale-only, Modifold-only, CurseForge-only)
 - Persistent cache to avoid reposting old releases
 - Discord embeds with download buttons
 
@@ -20,6 +21,7 @@ It supports:
 
 - Periodically polls:
   - Modtale project APIs
+  - Modifold project APIs
   - CurseForge (via CFWidget)
 - Detects **new versions/files**
 - Posts a rich embed message to a configured Discord channel
@@ -38,6 +40,7 @@ We also have a [Discord server](https://discord.gg/EsJFKh4y6z) where you can ask
 - Python **3.10+**
 - A Discord bot token
 - API access to the Modtale project(s) you want to track. Get your Modtale api token from: https://modtale.net/dashboard/developer
+- API access to the Modifold project(s) you want to track. Get your Modifold api token from: https://modifold.com/settings/api
 - Project IDs / slugs for CurseForge projects
 
 ---
@@ -77,8 +80,9 @@ Then open `.env` and fill in your values.
 
 You can enable:
 
-- Only Modtale (Leave CurseForge Blank: CURSEFORGE_PROJECTS_JSON=)
-- Only CurseForge (Leave Modtale Blank: MODTALE_PROJECTS_JSON=)
+- Only Modtale (Leave Modifold/CurseForge Blank: CURSEFORGE_PROJECTS_JSON=)
+- Only Modifold (Leave Modtale/CuseForge Blank: MODIFOLD_PROJECTS_JSON=)
+- Only CurseForge (Leave Modtale/Modifold Blank: MODTALE_PROJECTS_JSON=)
 
 Leaving a project JSON variable blank disables that source.
 
@@ -120,7 +124,7 @@ Edit .env and configure:
 
 - Channel ID
 
-- Modtale and/or CurseForge projects
+- Modtale, Modifold and/or CurseForge projects
 
 ### Build and start the container
 From the project root:
