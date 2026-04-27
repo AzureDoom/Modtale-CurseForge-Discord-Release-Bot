@@ -19,6 +19,8 @@ load_dotenv()
 CACHE_FILE = "cache.json"
 MODTALE_BASE_URL = "https://api.modtale.net/"
 MODIFOLD_BASE_URL = "https://api.modifold.com"
+CURSEFORGE_API_BASE_URL = "https://api.curseforge.com"
+
 VERSION_HEADER_RE = re.compile(r"(?mi)^(v?\d+(?:\.\d+)*(?:[-+._][A-Za-z0-9]+)?)\s*$")
 
 
@@ -32,9 +34,11 @@ class CurseforgeProjectCfg:
     project_id: str
     project_slug: str
 
+
 @dataclass(frozen=True)
 class ModifoldProjectCfg:
     project_slug: str
+
 
 @dataclass(frozen=True)
 class Config:
@@ -44,6 +48,7 @@ class Config:
     curseforge_poll_seconds: int
     modtale_api_token: str
     modtale_projects: List[ModtaleProjectCfg]
+    curseforge_api_token: str
     curseforge_projects: List[CurseforgeProjectCfg]
     modifold_api_token: str
     modifold_projects: List[ModifoldProjectCfg]
@@ -69,9 +74,8 @@ def parse_json_env_optional(name: str) -> Any:
 def load_config() -> Config:
     poll_seconds = int(os.getenv("POLL_SECONDS", "300"))
     cf_poll_seconds = int(os.getenv("CURSEFORGE_POLL_SECONDS", str(poll_seconds)))
-
     modtale_api_token = str(os.getenv("MODTALE_API_TOKEN") or "").strip()
-
+    curseforge_api_token = str(os.getenv("CURSEFORGE_API_TOKEN") or "").strip()
     modtale_raw = parse_json_env_optional("MODTALE_PROJECTS_JSON")
     curseforge_raw = parse_json_env_optional("CURSEFORGE_PROJECTS_JSON")
 
@@ -102,9 +106,9 @@ def load_config() -> Config:
         curseforge_projects.append(
             CurseforgeProjectCfg(project_id=project_id, project_slug=project_slug)
         )
+
     modifold_api_token = str(os.getenv("MODIFOLD_API_TOKEN") or "").strip()
     modifold_raw = parse_json_env_optional("MODIFOLD_PROJECTS_JSON")
-
     if not isinstance(modifold_raw, list):
         raise RuntimeError("MODIFOLD_PROJECTS_JSON must be a JSON array")
 
@@ -124,6 +128,7 @@ def load_config() -> Config:
         curseforge_poll_seconds=cf_poll_seconds,
         modtale_api_token=modtale_api_token,
         modtale_projects=modtale_projects,
+        curseforge_api_token=curseforge_api_token,
         curseforge_projects=curseforge_projects,
         modifold_api_token=modifold_api_token,
         modifold_projects=modifold_projects,
@@ -151,7 +156,6 @@ class JsonCache:
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-
             self.modtale_seen = {
                 str(k): set(map(str, v or []))
                 for k, v in (data.get("modtale_seen") or {}).items()
@@ -287,7 +291,6 @@ def convert_markdown_tables_to_codeblocks(text: str) -> str:
     lines = text.splitlines()
     out: List[str] = []
     i = 0
-
     while i < len(lines):
         if (
             i + 1 < len(lines)
@@ -304,25 +307,20 @@ def convert_markdown_tables_to_codeblocks(text: str) -> str:
             out.extend(table_lines)
             out.append("```")
             continue
-
         out.append(lines[i])
         i += 1
-
     return "\n".join(out)
 
 
 def extract_latest_changelog_section(text: str) -> str:
     if not text:
         return ""
-
     text = text.replace("\r\n", "\n").strip()
     if not text:
         return ""
-
     matches = list(VERSION_HEADER_RE.finditer(text))
     if not matches:
         return text
-
     start = matches[0].start()
     end = matches[1].start() if len(matches) > 1 else len(text)
     return text[start:end].strip()
@@ -331,30 +329,24 @@ def extract_latest_changelog_section(text: str) -> str:
 def truncate_discord_markdown(text: str, limit: int = 1000) -> str:
     if not text:
         return ""
-
     text = text.strip()
     if len(text) <= limit:
         return text
-
     truncated = text[: limit - 3]
-
     if truncated.count("```") % 2 != 0:
         truncated = truncated.rsplit("```", 1)[0].rstrip()
     if truncated.count("**") % 2 != 0:
         truncated = truncated.rsplit("**", 1)[0].rstrip()
-
     if "\n" in truncated[-200:]:
         truncated = truncated.rsplit("\n", 1)[0].rstrip()
     elif " " in truncated[-200:]:
         truncated = truncated.rsplit(" ", 1)[0].rstrip()
-
     return truncated + "..."
 
 
 def format_changelog_for_discord(raw_text: str, limit: int = 1000) -> str:
     if not raw_text:
         return ""
-
     text = clean_discord_changelog_text(raw_text)
     text = extract_latest_changelog_section(text)
     text = convert_markdown_tables_to_codeblocks(text)
@@ -420,11 +412,58 @@ def cfwidget_project_url(project_id: str) -> str:
     return f"https://api.cfwidget.com/{project_id}"
 
 
+def curseforge_changelog_url(project_id: str, file_id: str) -> str:
+    return (
+        f"{CURSEFORGE_API_BASE_URL.rstrip('/')}"
+        f"/v1/mods/{project_id}/files/{file_id}/changelog"
+    )
+
+
+async def fetch_curseforge_changelog(
+    session: aiohttp.ClientSession,
+    api_token: str,
+    project_id: str,
+    file_id: str,
+) -> str:
+    """
+    Fetch the changelog (HTML) for a CurseForge file via the official API.
+
+    Returns an empty string on any failure or when no api_token is provided,
+    so the caller can fall back to the existing no-changelog behavior.
+    """
+    if not api_token or not project_id or not file_id:
+        return ""
+    try:
+        payload = await fetch_json(
+            session,
+            curseforge_changelog_url(project_id, file_id),
+            headers={
+                "Accept": "application/json",
+                "x-api-key": api_token,
+            },
+        )
+    except aiohttp.ClientResponseError as e:
+        print(
+            f"[curseforge:{project_id}] Changelog HTTP error {e.status}: {e.message}"
+        )
+        return ""
+    except Exception as e:
+        print(f"[curseforge:{project_id}] Changelog fetch failed: {e}")
+        return ""
+
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, str):
+            return data
+    if isinstance(payload, str):
+        return payload
+    return ""
+
+
 def parse_cfwidget_files(project_json: dict) -> List[dict]:
     files = project_json.get("files") or []
     out: List[dict] = []
     seen: Set[str] = set()
-
     for file_obj in files:
         file_id = file_obj.get("id")
         if file_id is None:
@@ -434,7 +473,6 @@ def parse_cfwidget_files(project_json: dict) -> List[dict]:
             continue
         seen.add(file_id_str)
         out.append(file_obj)
-
     return out
 
 
@@ -443,12 +481,10 @@ def pick_new_modtale_versions(
 ) -> List[Dict[str, Any]]:
     versions = project_json.get("versions") or []
     new_items: List[Dict[str, Any]] = []
-
     for version in versions:
         version_id = str(version.get("id", "")).strip()
         if version_id and version_id not in seen:
             new_items.append(version)
-
     return new_items
 
 
@@ -490,15 +526,11 @@ def build_release_embed_and_view(
         ),
         color=discord.Color(0x0F172A),
     )
-
     if thumbnail_url:
         embed.set_thumbnail(url=thumbnail_url)
-
     if changelog_text:
         embed.add_field(name="Changelog", value=changelog_text, inline=False)
-
     embed.set_footer(text=f"By {author}")
-
     view = make_url_view(*buttons)
     return embed, view
 
@@ -519,7 +551,6 @@ def build_modtale_embed_and_view(
         limit=1000,
     )
     thumbnail_url = normalize_thumbnail_url(modtale_icon_url_from_project(project))
-
     return build_release_embed_and_view(
         platform_name="Modtale",
         project_title=project_title,
@@ -548,11 +579,11 @@ def build_curseforge_embed_and_view(
     project_slug: str,
     project_json: dict,
     file_obj: dict,
+    changelog_text: str = "",
 ) -> tuple[discord.Embed, discord.ui.View]:
     project_title = str(
         project_json.get("title") or project_json.get("name") or project_slug
     )
-
     version_label = str(
         file_obj.get("display")
         or file_obj.get("name")
@@ -560,23 +591,20 @@ def build_curseforge_embed_and_view(
         or file_obj.get("id")
         or "Unknown Version"
     )
-
     file_id = str(file_obj.get("id", "")).strip()
     author = get_curseforge_author(project_json)
-
     thumbnail_url = normalize_thumbnail_url(
         project_json.get("thumbnail")
         or project_json.get("logo")
         or (project_json.get("attachments") or {}).get("logo")
         or project_json.get("avatar")
     )
-
     return build_release_embed_and_view(
         platform_name="CurseForge",
         project_title=project_title,
         version_label=version_label,
         author=author,
-        changelog_text="",
+        changelog_text=changelog_text,
         thumbnail_url=thumbnail_url,
         buttons=[
             (
@@ -594,11 +622,14 @@ def build_curseforge_embed_and_view(
         ],
     )
 
+
 def modifold_project_page_url(slug: str) -> str:
     return f"https://modifold.com/mod/{slug}"
 
+
 def modifold_download_url(slug: str, version_number: str) -> str:
     return f"{MODIFOLD_BASE_URL}/projects/{slug}/version/{version_number}"
+
 
 def pick_new_modifold_versions(project_json: Dict[str, Any], seen: Set[str]) -> List[Dict[str, Any]]:
     versions = project_json.get("versions") or []
@@ -615,23 +646,23 @@ def pick_new_modifold_versions(project_json: Dict[str, Any], seen: Set[str]) -> 
             new_items.append(version)
     return new_items
 
+
 def get_modifold_author(project: dict) -> str:
     owner = project.get("owner")
     if isinstance(owner, dict):
         return str(owner.get("username") or owner.get("slug") or "Unknown Author")
-
     org = project.get("organization")
     if isinstance(org, dict):
         return str(org.get("name") or org.get("slug") or "Unknown Author")
-
     return "Unknown Author"
+
+
 def build_modifold_embed_and_view(
     project_slug: str,
     project: dict,
     version: dict,
 ) -> tuple[discord.Embed, discord.ui.View]:
     project_title = str(project.get("title") or project_slug)
-
     version_label = str(
         version.get("version_number")
         or version.get("versionNumber")
@@ -639,23 +670,18 @@ def build_modifold_embed_and_view(
         or version.get("id")
         or "Unknown Version"
     ).strip()
-
     author = get_modifold_author(project)
-
     changelog_text = format_changelog_for_discord(
         str(version.get("changelog") or version.get("release_notes") or version.get("description") or ""),
         limit=1000,
     )
-
     file_url = normalize_thumbnail_url(version.get("file_url"))
-
     thumbnail_url = normalize_thumbnail_url(
         project.get("icon")
         or project.get("icon_url")
         or project.get("image")
         or project.get("imageUrl")
     )
-
     return build_release_embed_and_view(
         platform_name="Modifold",
         project_title=project_title,
@@ -669,6 +695,7 @@ def build_modifold_embed_and_view(
         ],
     )
 
+
 def log_release(
     source: str, project_name: str, version_name: str, identifier: str
 ) -> None:
@@ -677,11 +704,9 @@ def log_release(
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
-
 cfg = load_config()
 cache = JsonCache(CACHE_FILE)
 cache.load()
-
 http_session: Optional[aiohttp.ClientSession] = None
 
 
@@ -689,7 +714,6 @@ async def get_target_channel() -> discord.TextChannel:
     channel = client.get_channel(cfg.channel_id)
     if isinstance(channel, discord.TextChannel):
         return channel
-
     fetched = await client.fetch_channel(cfg.channel_id)
     if not isinstance(fetched, discord.TextChannel):
         raise RuntimeError("CHANNEL_ID is not a text channel.")
@@ -700,9 +724,7 @@ async def get_target_channel() -> discord.TextChannel:
 async def poll_curseforge() -> None:
     if http_session is None:
         return
-
     channel = await get_target_channel()
-
     for project_cfg in cfg.curseforge_projects:
         try:
             project_json = await fetch_json(
@@ -710,16 +732,13 @@ async def poll_curseforge() -> None:
                 cfwidget_project_url(project_cfg.project_id),
                 headers={"Accept": "application/json"},
             )
-
             files = parse_cfwidget_files(project_json)
             if not files:
                 continue
-
             seen = cache.get_curseforge_seen(project_cfg.project_id)
             new_files = [f for f in files if str(f.get("id")) not in seen]
             if not new_files:
                 continue
-
             for file_obj in reversed(new_files):
                 file_id = str(file_obj.get("id", "")).strip()
                 file_display = (
@@ -734,19 +753,30 @@ async def poll_curseforge() -> None:
                     or project_cfg.project_slug
                 )
 
+                changelog_text = ""
+                if cfg.curseforge_api_token and file_id:
+                    raw_changelog = await fetch_curseforge_changelog(
+                        http_session,
+                        cfg.curseforge_api_token,
+                        project_cfg.project_id,
+                        file_id,
+                    )
+                    changelog_text = format_changelog_for_discord(
+                        raw_changelog,
+                        limit=1000,
+                    )
+
                 embed, view = build_curseforge_embed_and_view(
                     project_cfg.project_slug,
                     project_json,
                     file_obj,
+                    changelog_text=changelog_text,
                 )
                 await channel.send(embed=embed, view=view)
-
                 if file_id:
                     seen.add(file_id)
                 log_release("curseforge", project_title, str(file_display), file_id)
-
             cache.save()
-
         except aiohttp.ClientResponseError as e:
             print(
                 f"[curseforge:{project_cfg.project_id}] HTTP error {e.status}: {e.message}"
@@ -765,26 +795,21 @@ async def before_curseforge() -> None:
 async def poll_modtale() -> None:
     if http_session is None:
         return
-
     channel = await get_target_channel()
-
     for project_cfg in cfg.modtale_projects:
         headers: Dict[str, str] = {"Accept": "application/json"}
         if cfg.modtale_api_token:
             headers["X-MODTALE-KEY"] = cfg.modtale_api_token
-
         try:
             project = await fetch_json(
                 http_session,
                 f"{MODTALE_BASE_URL.rstrip('/')}/api/v1/projects/{project_cfg.project_uuid}",
                 headers=headers,
             )
-
             seen = cache.get_modtale_seen(project_cfg.project_uuid)
             new_versions = pick_new_modtale_versions(project, seen)
             if not new_versions:
                 continue
-
             for version in reversed(new_versions):
                 embed, view = build_modtale_embed_and_view(
                     project_cfg.project_uuid,
@@ -792,19 +817,15 @@ async def poll_modtale() -> None:
                     version,
                 )
                 await channel.send(embed=embed, view=view)
-
                 version_id = str(version.get("id", "")).strip()
                 version_number = (
                     str(version.get("versionNumber", "")).strip() or version_id
                 )
                 project_title = str(project.get("title") or project_cfg.project_uuid)
-
                 if version_id:
                     seen.add(version_id)
                 log_release("modtale", project_title, version_number, version_id)
-
             cache.save()
-
         except aiohttp.ClientResponseError as e:
             print(
                 f"[modtale:{project_cfg.project_uuid}] HTTP error {e.status}: {e.message}"
@@ -818,40 +839,33 @@ async def before_modtale() -> None:
     await client.wait_until_ready()
     await asyncio.sleep(2)
 
+
 @tasks.loop(seconds=60)
 async def poll_modifold() -> None:
     if http_session is None:
         return
-
     channel = await get_target_channel()
-
     for project_cfg in cfg.modifold_projects:
         headers: Dict[str, str] = {"Accept": "application/json"}
         if cfg.modifold_api_token:
             headers["Authorization"] = f"Bearer {cfg.modifold_api_token}"
-
         try:
             project = await fetch_json(
                 http_session,
                 f"{MODIFOLD_BASE_URL}/projects/{project_cfg.project_slug}",
                 headers=headers,
             )
-
             seen = cache.get_modifold_seen(project_cfg.project_slug)
             new_versions = pick_new_modifold_versions(project, seen)
-
             if not new_versions:
                 continue
-
             for version in reversed(new_versions):
                 embed, view = build_modifold_embed_and_view(
                     project_cfg.project_slug,
                     project,
                     version,
                 )
-
                 await channel.send(embed=embed, view=view)
-
                 version_id = str(
                     version.get("id")
                     or version.get("_id")
@@ -859,56 +873,55 @@ async def poll_modifold() -> None:
                     or version.get("versionNumber")
                     or ""
                 ).strip()
-
                 version_number = str(
                     version.get("version_number")
                     or version.get("versionNumber")
                     or version_id
                 )
-
                 project_title = str(project.get("title") or project_cfg.project_slug)
-
                 if version_id:
                     seen.add(version_id)
-
                 log_release("modifold", project_title, version_number, version_id)
-                cache.save()
-
+            cache.save()
         except aiohttp.ClientResponseError as e:
             print(f"[modifold:{project_cfg.project_slug}] HTTP error {e.status}: {e.message}")
         except Exception as e:
             print(f"[modifold:{project_cfg.project_slug}] Error: {e}")
+
 
 @poll_modifold.before_loop
 async def before_modifold() -> None:
     await client.wait_until_ready()
     await asyncio.sleep(2)
 
+
 @client.event
 async def on_ready() -> None:
     poll_curseforge.change_interval(seconds=cfg.curseforge_poll_seconds)
     poll_modtale.change_interval(seconds=cfg.poll_seconds)
     poll_modifold.change_interval(seconds=cfg.poll_seconds)
-
     if cfg.modtale_projects and not poll_modtale.is_running():
         poll_modtale.start()
         print(f"Modtale projects: {len(cfg.modtale_projects)}")
-
     if cfg.curseforge_projects and not poll_curseforge.is_running():
         poll_curseforge.start()
         print(f"CurseForge projects: {len(cfg.curseforge_projects)}")
-
+        if cfg.curseforge_api_token:
+            print("CurseForge API token detected: changelogs will be fetched.")
+        else:
+            print(
+                "No CurseForge API token configured: "
+                "changelogs will be omitted from CurseForge embeds."
+            )
     if cfg.modifold_projects and not poll_modifold.is_running():
         poll_modifold.start()
         print(f"Modifold projects: {len(cfg.modifold_projects)}")
-
     print(f"Logged in as {client.user}")
     print("Successfully finished startup!")
 
 
 async def shutdown() -> None:
     global http_session
-
     try:
         if poll_modtale.is_running():
             poll_modtale.cancel()
@@ -916,7 +929,6 @@ async def shutdown() -> None:
             poll_curseforge.cancel()
         if poll_modifold.is_running():
             poll_modifold.cancel()
-
         if http_session is not None:
             await http_session.close()
             http_session = None
@@ -926,10 +938,8 @@ async def shutdown() -> None:
 
 async def run_bot() -> None:
     global http_session
-
     if http_session is None:
         http_session = aiohttp.ClientSession()
-
     try:
         await client.start(cfg.discord_token)
     finally:
@@ -942,13 +952,11 @@ def main() -> None:
     async def runner() -> None:
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
-
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
                 loop.add_signal_handler(sig, stop_event.set)
             except NotImplementedError:
                 signal.signal(sig, lambda *_: stop_event.set())
-
         bot_task = asyncio.create_task(run_bot())
         await stop_event.wait()
         await shutdown()
