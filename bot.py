@@ -7,7 +7,7 @@ import signal
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Set
-from urllib.parse import urljoin
+from urllib.parse import quote, urlencode, urljoin
 
 import aiohttp
 import discord
@@ -377,11 +377,73 @@ def get_modtale_changelog(version: dict, project: dict) -> str:
     )
 
 
-def modtale_download_url(project_uuid: str, version_number: str) -> str:
-    return (
+def modtale_download_url_endpoint(
+    project_uuid: str,
+    version_number: str,
+    game_version: Optional[str] = None,
+) -> str:
+    project_id = quote(str(project_uuid), safe="")
+    version = quote(str(version_number), safe="")
+    url = (
         f"{MODTALE_BASE_URL.rstrip('/')}/api/v1/projects/"
-        f"{project_uuid}/versions/{version_number}/download"
+        f"{project_id}/versions/{version}/download-url"
     )
+    if game_version:
+        url += "?" + urlencode({"gameVersion": game_version})
+    return url
+
+
+def get_modtale_game_version(version: dict) -> Optional[str]:
+    game_versions = version.get("gameVersions") or version.get("game_versions") or []
+    if isinstance(game_versions, list) and game_versions:
+        return str(game_versions[0]).strip() or None
+    game_version = str(version.get("gameVersion") or version.get("game_version") or "").strip()
+    return game_version or None
+
+
+async def fetch_modtale_download_url(
+    session: aiohttp.ClientSession,
+    api_token: str,
+    project_uuid: str,
+    version_number: str,
+    game_version: Optional[str] = None,
+) -> str:
+    """Resolve the short-lived Modtale download URL for a version."""
+    if not project_uuid or not version_number:
+        return ""
+
+    headers: Dict[str, str] = {"Accept": "application/json"}
+    if api_token:
+        headers["X-MODTALE-KEY"] = api_token
+
+    try:
+        payload = await fetch_json(
+            session,
+            modtale_download_url_endpoint(project_uuid, version_number, game_version),
+            headers=headers,
+        )
+    except aiohttp.ClientResponseError as e:
+        print(
+            f"[modtale:{project_uuid}] Download URL HTTP error "
+            f"{e.status}: {e.message}"
+        )
+        return ""
+    except Exception as e:
+        print(f"[modtale:{project_uuid}] Download URL fetch failed: {e}")
+        return ""
+
+    if isinstance(payload, dict):
+        raw = str(payload.get("downloadUrl") or payload.get("url") or "").strip()
+        if not raw:
+            return ""
+        # The API returns a root-relative path like /download/{token}.
+        # The actual endpoint is /api/v1/download/{token}, so we must prepend
+        # the base URL plus /api/v1 rather than using make_absolute_url which
+        # would produce https://api.modtale.net/download/{token} (404).
+        if raw.startswith("/"):
+            return f"{MODTALE_BASE_URL.rstrip('/')}/api/v1{raw}"
+        return raw
+    return ""
 
 
 def modtale_project_page_url(project: dict, project_uuid: str) -> str:
@@ -539,6 +601,7 @@ def build_modtale_embed_and_view(
     project_uuid: str,
     project: dict,
     version: dict,
+    download_url: Optional[str] = None,
 ) -> tuple[discord.Embed, discord.ui.View]:
     project_title = str(project.get("title") or "Modtale Project")
     version_label = (
@@ -561,11 +624,7 @@ def build_modtale_embed_and_view(
         buttons=[
             (
                 "Download from Modtale",
-                (
-                    modtale_download_url(project_uuid, version_label)
-                    if version_label
-                    else None
-                ),
+                download_url if version_label else None,
             ),
             (
                 "View File Page",
@@ -811,16 +870,24 @@ async def poll_modtale() -> None:
             if not new_versions:
                 continue
             for version in reversed(new_versions):
-                embed, view = build_modtale_embed_and_view(
-                    project_cfg.project_uuid,
-                    project,
-                    version,
-                )
-                await channel.send(embed=embed, view=view)
                 version_id = str(version.get("id", "")).strip()
                 version_number = (
                     str(version.get("versionNumber", "")).strip() or version_id
                 )
+                download_url = await fetch_modtale_download_url(
+                    http_session,
+                    cfg.modtale_api_token,
+                    project_cfg.project_uuid,
+                    version_number,
+                    game_version=get_modtale_game_version(version),
+                )
+                embed, view = build_modtale_embed_and_view(
+                    project_cfg.project_uuid,
+                    project,
+                    version,
+                    download_url=download_url,
+                )
+                await channel.send(embed=embed, view=view)
                 project_title = str(project.get("title") or project_cfg.project_uuid)
                 if version_id:
                     seen.add(version_id)
