@@ -199,14 +199,30 @@ async def fetch_json(
     session: aiohttp.ClientSession,
     url: str,
     headers: Optional[Dict[str, str]] = None,
+    attempts: int = 3,
 ) -> Any:
-    async with session.get(
-        url,
-        headers=headers,
-        timeout=aiohttp.ClientTimeout(total=30),
-    ) as resp:
-        resp.raise_for_status()
-        return await resp.json()
+    retryable_errors = (
+        aiohttp.ClientPayloadError,
+        aiohttp.ServerDisconnectedError,
+        aiohttp.ClientConnectionError,
+        asyncio.TimeoutError,
+    )
+
+    for attempt in range(1, attempts + 1):
+        try:
+            async with session.get(
+                url,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                resp.raise_for_status()
+                return await resp.json()
+        except retryable_errors:
+            if attempt == attempts:
+                raise
+            await asyncio.sleep(2 ** (attempt - 1))
+
+    raise RuntimeError("JSON request exhausted without returning or raising")
 
 
 def make_absolute_url(base: str, maybe_relative: str) -> str:
@@ -539,15 +555,42 @@ def parse_cfwidget_files(project_json: dict) -> List[dict]:
 
 
 def pick_new_modtale_versions(
-    project_json: Dict[str, Any], seen: Set[str]
+    versions_json: Dict[str, Any], seen: Set[str]
 ) -> List[Dict[str, Any]]:
-    versions = project_json.get("versions") or []
+    versions = versions_json.get("versions") or []
     new_items: List[Dict[str, Any]] = []
     for version in versions:
         version_id = str(version.get("id", "")).strip()
         if version_id and version_id not in seen:
             new_items.append(version)
     return new_items
+
+
+def add_modtale_changelogs(
+    versions: List[Dict[str, Any]], changelogs: Any
+) -> None:
+    if not isinstance(changelogs, list):
+        return
+
+    by_id: Dict[str, str] = {}
+    by_number: Dict[str, str] = {}
+    for item in changelogs:
+        if not isinstance(item, dict):
+            continue
+        changelog = str(item.get("changelog") or "").strip()
+        version_id = str(item.get("id") or "").strip()
+        version_number = str(item.get("versionNumber") or "").strip()
+        if version_id:
+            by_id[version_id] = changelog
+        if version_number:
+            by_number[version_number] = changelog
+
+    for version in versions:
+        version_id = str(version.get("id") or "").strip()
+        version_number = str(version.get("versionNumber") or "").strip()
+        changelog = by_id.get(version_id) or by_number.get(version_number)
+        if changelog:
+            version["changelog"] = changelog
 
 
 def get_curseforge_author(project_json: dict) -> str:
@@ -865,10 +908,31 @@ async def poll_modtale() -> None:
                 f"{MODTALE_BASE_URL.rstrip('/')}/api/v1/projects/{project_cfg.project_uuid}",
                 headers=headers,
             )
+            versions_json = await fetch_json(
+                http_session,
+                f"{MODTALE_BASE_URL.rstrip('/')}/api/v1/projects/"
+                f"{project_cfg.project_uuid}/versions",
+                headers=headers,
+            )
             seen = cache.get_modtale_seen(project_cfg.project_uuid)
-            new_versions = pick_new_modtale_versions(project, seen)
+            new_versions = pick_new_modtale_versions(versions_json, seen)
             if not new_versions:
                 continue
+            try:
+                changelogs = await fetch_json(
+                    http_session,
+                    f"{MODTALE_BASE_URL.rstrip('/')}/api/v1/projects/"
+                    f"{project_cfg.project_uuid}/versions/changelogs",
+                    headers=headers,
+                )
+                add_modtale_changelogs(new_versions, changelogs)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                # A changelog is optional; still announce the release if this
+                # focused subresource is temporarily unavailable.
+                print(
+                    f"[modtale:{project_cfg.project_uuid}] "
+                    f"Changelog fetch failed: {e}"
+                )
             for version in reversed(new_versions):
                 version_id = str(version.get("id", "")).strip()
                 version_number = (
